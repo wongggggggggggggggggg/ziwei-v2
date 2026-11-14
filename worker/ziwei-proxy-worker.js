@@ -104,6 +104,25 @@ async function writeGlobal(env, value) {
   memGlobal.set(key, value);
 }
 
+async function recordVisitor(env, ip, name) {
+  if (!env.ZWDS_KV) return;
+  const key = "v:" + weekKey();
+  let list = [];
+  try {
+    const raw = await env.ZWDS_KV.get(key, "json");
+    if (Array.isArray(raw)) list = raw;
+  } catch (error) { list = []; }
+  list.push({ ip: ip, name: name, t: Date.now() });
+  if (list.length > 200) list = list.slice(-200);
+  await env.ZWDS_KV.put(key, JSON.stringify(list), { expirationTtl: 30 * 86400 });
+  await env.ZWDS_KV.put("n:" + ip, name, { expirationTtl: 30 * 86400 });
+}
+
+async function getVisitorName(env, ip) {
+  if (!env.ZWDS_KV) return "";
+  try { return (await env.ZWDS_KV.get("n:" + ip)) || ""; } catch (error) { return ""; }
+}
+
 function maskIp(ip) {
   const text = String(ip || "");
   if (text.indexOf(":") !== -1) {
@@ -217,6 +236,7 @@ export default {
         ok: true,
         week: weekKey(),
         ip: maskIp(ip),
+        name: await getVisitorName(env, ip),
         used: q.used,
         bonus: q.bonus || 0,
         limit,
@@ -232,6 +252,23 @@ export default {
         unlockEnabled: Boolean(env.UNLOCK_PASSWORD),
         turnstileEnabled: Boolean(env.TURNSTILE_SECRET)
       }, 200, origin);
+    }
+
+    /* ---- 訪客紀錄（需要 key；預設用 UNLOCK_PASSWORD） ---- */
+    if (request.method === "GET" && url.pathname === "/visitors") {
+      const expected = env.ADMIN_PASSWORD || env.UNLOCK_PASSWORD || "";
+      if (!expected) return fail("未設定管理密碼", 503, origin, "no_admin");
+      if (!safeEqual(url.searchParams.get("key") || "", expected)) {
+        return fail("未授權（key 不正確）", 401, origin, "auth");
+      }
+      let list = [];
+      if (env.ZWDS_KV) {
+        try {
+          const raw = await env.ZWDS_KV.get("v:" + weekKey(), "json");
+          if (Array.isArray(raw)) list = raw;
+        } catch (error) { list = []; }
+      }
+      return json({ ok: true, week: weekKey(), count: list.length, recent: list.slice(-50) }, 200, origin);
     }
 
     if (request.method !== "POST") return fail("只接受 POST", 405, origin, "method");
@@ -279,11 +316,20 @@ export default {
       if (!ts.ok) {
         return fail("人機驗證失敗" + (ts.error ? "（" + ts.error + "）" : ""), 400, origin, "turnstile");
       }
+      const name = String((body && body.name) || "").trim().slice(0, 20);
+      if (!name) {
+        return fail("請先輸入一個短名（1–20 字）", 400, origin, "name_required");
+      }
+      await recordVisitor(env, ip, name);
+
       if (ts.skipped) {
-        return json({ ok: true, skipped: true, ttl: SESSION_TTL_SECONDS }, 200, origin);
+        return json({ ok: true, skipped: true, ttl: SESSION_TTL_SECONDS, name: name, ip: maskIp(ip) }, 200, origin);
       }
       const session = await issueSession(env);
-      return json({ ok: true, token: session.token, exp: session.exp, ttl: session.ttl }, 200, origin);
+      return json({
+        ok: true, token: session.token, exp: session.exp, ttl: session.ttl,
+        name: name, ip: maskIp(ip)
+      }, 200, origin);
     }
 
     /* ---- 對話 ---- */
