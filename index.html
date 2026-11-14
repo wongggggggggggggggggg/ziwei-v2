@@ -2182,6 +2182,12 @@
     .gate-card h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
     .gate-card .hint { font-size: .82rem; opacity: .8; margin: .35rem 0; }
     #gateSlot { margin: 1rem 0 .6rem; display: flex; justify-content: center; }
+    .gate-name {
+      width: 100%; box-sizing: border-box; padding: .6rem .8rem; border-radius: .6rem;
+      border: 1px solid rgba(148, 163, 184, .55); background: transparent; color: inherit;
+      font-size: .95rem; margin-top: .9rem;
+    }
+    .gate-name:focus { outline: 2px solid #6366f1; outline-offset: 1px; }
     #gateRetryBtn { margin-top: .4rem; }
     #gateRetryBtn[hidden] { display: none; }
   </style>
@@ -2498,7 +2504,7 @@
         THINKING: "disabled",   // v2.1：思考模式預設開啟會令 temperature 失效、變慢、變貴
         TURNSTILE_SITE_KEY: "0x4AAAAAAGA8l3vddzBzeEAu", // Cloudflare Turnstile Site Key（公開資料）
         STREAM: true,           // v2：串流輸出（逐字顯示）
-        APP_VERSION: "2.5.2",
+        APP_VERSION: "2.6.0",
         HISTORY_LIMIT: 20
       });
 
@@ -3351,6 +3357,12 @@
           return;
         }
 
+        if (gateNeeded()) {
+          pendingReading = true;
+          showGate();
+          return;
+        }
+
         if (!getApiKey()) {
           showError("尚未設定 DeepSeek API 金鑰。請在右上角「設定」貼上金鑰，或改用代理模式。", "missing-key");
           setResultState("error");
@@ -3415,6 +3427,7 @@
             openSettings();
           }
           if (normalized.code === "session") {
+            pendingReading = true;
             sessionToken = "";
             try { window.sessionStorage.removeItem("zwds.session"); } catch (error) { /* 忽略 */ }
             showGate();
@@ -4020,6 +4033,10 @@
           });
         }
         loadTurnstile();
+        const gateNameInput = document.getElementById("gateName");
+        if (gateNameInput) {
+          try { gateNameInput.value = window.localStorage.getItem("zwds.name") || ""; } catch (error) { /* 忽略 */ }
+        }
         maybeShowGate();
         refreshQuota();
 
@@ -4047,6 +4064,7 @@
       let sessionToken = "";
       try { sessionToken = window.sessionStorage.getItem(SESSION_KEY) || ""; } catch (error) { sessionToken = ""; }
       let gateWidgetId = null;
+      let pendingReading = false;
 
       function gateNeeded() {
         return keyMode() === "proxy" && Boolean(CONFIG.TURNSTILE_SITE_KEY) && !sessionToken;
@@ -4068,12 +4086,22 @@
 
       async function onGateSuccess(token) {
         const status = document.getElementById("gateStatus");
+        const nameInput = document.getElementById("gateName");
+        const name = nameInput ? String(nameInput.value || "").trim() : "";
+
+        if (!name) {
+          if (status) status.textContent = "請先輸入一個短名（1–20 字），再等一下驗證完成";
+          if (nameInput) nameInput.focus();
+          if (window.turnstile && gateWidgetId !== null) window.turnstile.reset(gateWidgetId);
+          return;
+        }
+
         if (status) status.textContent = "驗證成功，正在開通…";
         try {
           const res = await fetch(proxyBase() + "/verify", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ "cf-turnstile-response": token })
+            body: JSON.stringify({ "cf-turnstile-response": token, name: name })
           });
           const data = await res.json().catch(() => null);
 
@@ -4098,8 +4126,16 @@
           } else {
             sessionToken = "skipped";
           }
+          try { window.localStorage.setItem("zwds.name", name); } catch (error) { /* 忽略 */ }
+          const nameEl = document.getElementById("gateName");
+          if (nameEl) nameEl.value = name;
           hideGate();
-          showToast("驗證完成，可以開始解讀");
+          showToast("驗證完成，" + name + "，可以開始解讀");
+
+          if (pendingReading) {
+            pendingReading = false;
+            window.setTimeout(() => startReading(), 200);
+          }
         } catch (error) {
           if (status) status.textContent = "網絡問題，請再試一次";
         }
@@ -4154,6 +4190,7 @@
           if (!res.ok || !data) { status.textContent = "讀取失敗"; return; }
 
           status.textContent =
+            (data.name ? "你好，" + data.name + "｜" : "") +
             "你的 IP：" + (data.ip || "?") +
             "｜個人：已用 " + data.used + " / " + data.limit + "（剩 " + data.remaining + "）" +
             "｜全站：已用 " + data.globalUsed + " / " + data.globalLimit + "（剩 " + data.globalRemaining + "）";
@@ -4276,6 +4313,8 @@
     <div class="gate-card">
       <h3 id="gateTitle">先完成人機驗證</h3>
       <p class="hint">為防止濫用，使用前需要通過 Cloudflare 驗證。通過後 30 分鐘內免再驗。</p>
+      <input class="gate-name" id="gateName" type="text" maxlength="20" autocomplete="nickname"
+             placeholder="你的短名（1–20 字，例如 Kevin）" aria-label="你的短名" />
       <div id="gateSlot"></div>
       <p class="hint" id="gateStatus">驗證中…</p>
       <button class="btn btn-primary" id="gateRetryBtn" type="button" hidden>重新驗證</button>
