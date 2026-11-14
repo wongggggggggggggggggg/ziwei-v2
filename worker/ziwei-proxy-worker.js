@@ -23,11 +23,14 @@ const ALLOWED_ORIGINS = [
 const ALLOWED_MODELS = ["deepseek-flash", "deepseek-v4-pro"];
 const MAX_TOKENS_CAP = 4096;
 const WEEKLY_MAX = 10;      // 每人每週免費次數
-const UNLOCK_BONUS = 10;    // 每次解鎖額外加送
+const UNLOCK_BONUS = 10;    // 每次解鎖：個人 +10
+const GLOBAL_WEEKLY_MAX = 40;    // 全站每週總次數（所有 IP 合計），超過即全站封鎖
+const GLOBAL_UNLOCK_BONUS = 40;  // 每次解鎖：全站額度 +40（即解鎖一次放行多一輪）
 const RATE_WINDOW_MS = 60000;
 const RATE_MAX = 6;         // 每 IP 每分鐘最多 6 次（防瞬時爆發）
 
 const memQuota = new Map();
+const memGlobal = new Map();
 const memRate = new Map();
 
 /* ---------------- CORS / 回應 ---------------- */
@@ -78,6 +81,36 @@ async function writeQuota(env, ip, value) {
     return;
   }
   memQuota.set(key, value);
+}
+
+/* ---------------- 全站每週總額 ---------------- */
+async function readGlobal(env) {
+  const key = "g:" + weekKey();
+  if (env.ZWDS_KV) {
+    const raw = await env.ZWDS_KV.get(key, "json");
+    return raw || { used: 0, bonus: 0 };
+  }
+  return memGlobal.get(key) || { used: 0, bonus: 0 };
+}
+
+async function writeGlobal(env, value) {
+  const key = "g:" + weekKey();
+  if (env.ZWDS_KV) {
+    await env.ZWDS_KV.put(key, JSON.stringify(value), { expirationTtl: 14 * 86400 });
+    return;
+  }
+  memGlobal.set(key, value);
+}
+
+function maskIp(ip) {
+  const text = String(ip || "");
+  if (text.indexOf(":") !== -1) {
+    const parts = text.split(":");
+    return parts.slice(0, 3).join(":") + ":****";
+  }
+  const parts = text.split(".");
+  if (parts.length === 4) return parts[0] + "." + parts[1] + "." + parts[2] + ".*";
+  return text || "unknown";
 }
 
 /* ---------------- 限流（固定窗口） ---------------- */
@@ -146,16 +179,25 @@ export default {
     /* ---- 查詢配額 ---- */
     if (request.method === "GET" && url.pathname === "/quota") {
       const q = await readQuota(env, ip);
+      const g = await readGlobal(env);
       const limit = WEEKLY_MAX + (q.bonus || 0);
+      const globalLimit = GLOBAL_WEEKLY_MAX + (g.bonus || 0);
       return json({
         ok: true,
         week: weekKey(),
+        ip: maskIp(ip),
         used: q.used,
         bonus: q.bonus || 0,
         limit,
         remaining: Math.max(0, limit - q.used),
         weeklyMax: WEEKLY_MAX,
         unlockBonus: UNLOCK_BONUS,
+        globalUsed: g.used,
+        globalBonus: g.bonus || 0,
+        globalLimit,
+        globalRemaining: Math.max(0, globalLimit - g.used),
+        globalWeeklyMax: GLOBAL_WEEKLY_MAX,
+        globalBlocked: g.used >= globalLimit,
         unlockEnabled: Boolean(env.UNLOCK_PASSWORD),
         turnstileEnabled: Boolean(env.TURNSTILE_SECRET)
       }, 200, origin);
@@ -183,8 +225,18 @@ export default {
       const q = await readQuota(env, ip);
       q.bonus = (q.bonus || 0) + UNLOCK_BONUS;
       await writeQuota(env, ip, q);
+
+      const g = await readGlobal(env);
+      g.bonus = (g.bonus || 0) + GLOBAL_UNLOCK_BONUS;
+      await writeGlobal(env, g);
+
       const limit = WEEKLY_MAX + q.bonus;
-      return json({ ok: true, bonus: q.bonus, used: q.used, limit, remaining: Math.max(0, limit - q.used) }, 200, origin);
+      const globalLimit = GLOBAL_WEEKLY_MAX + g.bonus;
+      return json({
+        ok: true,
+        bonus: q.bonus, used: q.used, limit, remaining: Math.max(0, limit - q.used),
+        globalBonus: g.bonus, globalLimit, globalRemaining: Math.max(0, globalLimit - g.used)
+      }, 200, origin);
     }
 
     /* ---- 對話 ---- */
@@ -193,6 +245,16 @@ export default {
 
     if (!rateOk("chat:" + ip, RATE_MAX, RATE_WINDOW_MS)) {
       return fail("請求太頻繁，請一分鐘後再試。", 429, origin, "rate");
+    }
+
+    const globalState = await readGlobal(env);
+    const globalLimit = GLOBAL_WEEKLY_MAX + (globalState.bonus || 0);
+    if (globalState.used >= globalLimit) {
+      return fail(
+        "本週全站次數已用完（" + globalLimit + " 次）。輸入解鎖碼可即時恢復（每次 +" +
+          GLOBAL_UNLOCK_BONUS + " 次），或由站長在 Cloudflare 調整。",
+        429, origin, "global_blocked"
+      );
     }
 
     const quota = await readQuota(env, ip);
@@ -217,6 +279,9 @@ export default {
     quota.used += 1;
     await writeQuota(env, ip, quota);
 
+    globalState.used += 1;
+    await writeGlobal(env, globalState);
+
     let upstream;
     try {
       upstream = await fetch("https://api.deepseek.com/chat/completions", {
@@ -233,7 +298,8 @@ export default {
 
     const headers = Object.assign(corsHeaders(origin), {
       "content-type": upstream.headers.get("content-type") || "application/json",
-      "x-quota-remaining": String(Math.max(0, limit - quota.used))
+      "x-quota-remaining": String(Math.max(0, limit - quota.used)),
+      "x-global-remaining": String(Math.max(0, globalLimit - globalState.used))
     });
     if (payload.stream) headers["cache-control"] = "no-store";
 
