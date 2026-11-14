@@ -2161,6 +2161,14 @@
     .history-empty { font-size: .9rem; opacity: .7; margin: 0; }
     .kbd-note { font-size: .78rem; opacity: .65; margin: .5rem 0 0; }
     .setting-block[hidden] { display: none; }
+    .quota-chip {
+      border: 1px solid rgba(148, 163, 184, .45); background: transparent; color: inherit;
+      border-radius: 999px; padding: .34rem .72rem; font-size: .78rem; letter-spacing: .02em;
+      cursor: pointer; white-space: nowrap;
+    }
+    .quota-chip[hidden] { display: none; }
+    .quota-chip[data-state="low"] { border-color: #f59e0b; color: #f59e0b; }
+    .quota-chip[data-state="blocked"] { border-color: #ef4444; color: #ef4444; }
   </style>
 </head>
 <body>
@@ -2174,6 +2182,7 @@
         <span class="brand-text">紫微斗數 <span class="brand-ai">AI</span> 解牌</span>
       </a>
       <div class="topbar-actions">
+        <button class="quota-chip" id="quotaChip" type="button" hidden>本週 — 次</button>
         <button class="icon-btn" id="themeToggle" type="button" aria-label="切換為淺色主題" title="切換主題">
           <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
             <circle cx="12" cy="12" r="4"></circle>
@@ -2474,7 +2483,7 @@
         THINKING: "disabled",   // v2.1：思考模式預設開啟會令 temperature 失效、變慢、變貴
         TURNSTILE_SITE_KEY: "0x4AAAAAAGA8l3vddzBzeEAu", // Cloudflare Turnstile Site Key（公開資料）
         STREAM: true,           // v2：串流輸出（逐字顯示）
-        APP_VERSION: "2.3.0",
+        APP_VERSION: "2.4.0",
         HISTORY_LIMIT: 20
       });
 
@@ -3188,7 +3197,7 @@
             } catch (error) {
               apiMessage = "";
             }
-            const isQuota = apiCode === "quota_exhausted";
+            const isQuota = apiCode === "quota_exhausted" || apiCode === "global_blocked";
             const message = isQuota
               ? (apiMessage || "本週免費次數已用完。")
               : (entry
@@ -3954,6 +3963,14 @@
         if (elsV2.closeHistoryBtn) elsV2.closeHistoryBtn.addEventListener("click", closeHistory);
         if (elsV2.downloadBtn) elsV2.downloadBtn.addEventListener("click", downloadReading);
 
+        const quotaChip = document.getElementById("quotaChip");
+        if (quotaChip) {
+          quotaChip.addEventListener("click", () => {
+            openSettings();
+            refreshQuota();
+          });
+        }
+
         const unlockBtn = document.getElementById("unlockBtn");
         if (unlockBtn) unlockBtn.addEventListener("click", unlockQuota);
         const unlockInput = document.getElementById("unlockInput");
@@ -3994,16 +4011,31 @@
       async function refreshQuota() {
         const block = document.getElementById("quotaBlock");
         const status = document.getElementById("quotaStatus");
+        const chip = document.getElementById("quotaChip");
         if (!block || !status) return;
-        if (keyMode() !== "proxy") { block.hidden = true; return; }
+        if (keyMode() !== "proxy") {
+          block.hidden = true;
+          if (chip) chip.hidden = true;
+          return;
+        }
         block.hidden = false;
+        if (chip) chip.hidden = false;
         status.textContent = "讀取中…";
         try {
           const res = await fetch(proxyBase() + "/quota");
           const data = await res.json().catch(() => null);
           if (!res.ok || !data) { status.textContent = "讀取失敗"; return; }
-          status.textContent = "本週免費 " + data.weeklyMax + " 次，已用 " + data.used +
-            " 次，剩 " + data.remaining + " 次（目前上限 " + data.limit + "）";
+
+          status.textContent =
+            "你的 IP：" + (data.ip || "?") +
+            "｜個人：已用 " + data.used + " / " + data.limit + "（剩 " + data.remaining + "）" +
+            "｜全站：已用 " + data.globalUsed + " / " + data.globalLimit + "（剩 " + data.globalRemaining + "）";
+
+          if (chip) {
+            chip.textContent = data.globalBlocked ? "全站已滿" : "本週 " + data.remaining + " 次";
+            chip.dataset.state = data.globalBlocked ? "blocked" : (data.remaining <= 2 ? "low" : "ok");
+            chip.title = "個人剩 " + data.remaining + " 次／全站剩 " + data.globalRemaining + " 次（點擊查看或解鎖）";
+          }
         } catch (error) {
           status.textContent = "讀取失敗（網絡問題）";
         }
