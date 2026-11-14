@@ -40,9 +40,10 @@ function corsHeaders(origin) {
   const allowed = allowAll || ALLOWED_ORIGINS.includes(origin);
   return {
     "Access-Control-Allow-Origin": allowed ? (allowAll ? "*" : origin) : "null",
-    "Access-Control-Allow-Headers": "content-type, x-request-id",
+    "Access-Control-Allow-Headers": "content-type, x-request-id, x-zwds-session",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Max-Age": "86400",
+    "Access-Control-Expose-Headers": "x-quota-remaining, x-global-remaining",
     Vary: "Origin"
   };
 }
@@ -288,7 +289,13 @@ export default {
     /* ---- 對話 ---- */
     if (url.pathname !== "/chat") return fail("not found", 404, origin, "path");
 
-    const session = await checkSession(env, request.headers.get("x-zwds-session"));
+    let payload = null;
+    try { payload = await request.json(); } catch (error) { payload = null; }
+
+    const session = await checkSession(
+      env,
+      request.headers.get("x-zwds-session") || (payload && payload.session)
+    );
     if (!session.ok) {
       return fail(
         "請先完成人機驗證（" + (session.reason === "expired" ? "驗證已過期" : "未通過驗證") + "）。",
@@ -320,8 +327,6 @@ export default {
       );
     }
 
-    let payload = null;
-    try { payload = await request.json(); } catch (error) { payload = null; }
     if (!payload || ALLOWED_MODELS.indexOf(payload.model) === -1) {
       return fail("model not allowed", 400, origin, "model");
     }
@@ -329,6 +334,7 @@ export default {
       payload.max_tokens = MAX_TOKENS_CAP;
     }
     delete payload.n;
+    delete payload.session;
 
     quota.used += 1;
     await writeQuota(env, ip, quota);
