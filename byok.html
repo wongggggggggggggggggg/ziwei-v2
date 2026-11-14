@@ -4062,6 +4062,15 @@
             body: JSON.stringify({ "cf-turnstile-response": token })
           });
           const data = await res.json().catch(() => null);
+
+          // 舊版 Worker 未有 /verify（404/405）→ 放行，避免整站卡死
+          if (res.status === 404 || res.status === 405) {
+            sessionToken = "legacy-worker";
+            hideGate();
+            showToast("Worker 未支援整站驗證（請更新 Worker）", "error");
+            return;
+          }
+
           if (!res.ok) {
             if (status) status.textContent = (data && data.error && data.error.message) || "驗證失敗，請再試";
             if (window.turnstile && gateWidgetId !== null) window.turnstile.reset(gateWidgetId);
