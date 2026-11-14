@@ -2498,7 +2498,7 @@
         THINKING: "disabled",   // v2.1：思考模式預設開啟會令 temperature 失效、變慢、變貴
         TURNSTILE_SITE_KEY: "0x4AAAAAAGA8l3vddzBzeEAu", // Cloudflare Turnstile Site Key（公開資料）
         STREAM: true,           // v2：串流輸出（逐字顯示）
-        APP_VERSION: "2.5.1",
+        APP_VERSION: "2.5.2",
         HISTORY_LIMIT: 20
       });
 
@@ -3135,6 +3135,7 @@
           url: useProxy ? base + "/chat" : API_ENDPOINT,
           headers: headers,
           body: JSON.stringify({
+            session: useProxy ? sessionToken : undefined,
             model: API_MODEL,
             messages: [
               { role: "system", content: SYSTEM_PROMPT },
