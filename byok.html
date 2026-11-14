@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0f172a" id="themeColorMeta" />
   <!-- v2 安全加固：CSP 限制連線目的地。
        若用 Cloudflare Worker 代理，https://*.workers.dev 已允許；自訂網域請自行加入 connect-src。 -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.deepseek.com https://*.workers.dev https://ziwe-kevin.www-wongkevin404.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.deepseek.com https://*.workers.dev https://ziwe-kevin.www-wongkevin404.workers.dev https://challenges.cloudflare.com; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; base-uri 'none'; form-action 'none'; object-src 'none'" />
   <meta name="description" content="結合紫微斗數牌卡與 AI 的智慧解讀。選擇主星、輔星與十二長生，探索此刻的星曜能量。" />
   <title>🔮 紫微斗數 AI 解牌</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AE%3C/text%3E%3C/svg%3E" />
@@ -2160,6 +2160,7 @@
     .history-item .row { display: flex; gap: .4rem; margin-top: .55rem; flex-wrap: wrap; }
     .history-empty { font-size: .9rem; opacity: .7; margin: 0; }
     .kbd-note { font-size: .78rem; opacity: .65; margin: .5rem 0 0; }
+    .setting-block[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -2434,6 +2435,18 @@
           <button class="btn btn-primary" id="saveSettingsBtn" type="button">儲存設定</button>
         </div>
       </section>
+
+      <!-- v2.2：代理模式的每週配額與解鎖碼 -->
+      <section class="setting-block" id="quotaBlock" hidden>
+        <h3>本週使用次數</h3>
+        <p class="hint" id="quotaStatus">讀取中…</p>
+        <div class="key-field">
+          <input id="unlockInput" type="password" autocomplete="off" spellcheck="false" placeholder="解鎖碼" aria-label="解鎖碼" />
+          <button class="icon-btn" id="unlockBtn" type="button" aria-label="解鎖更多次數" title="解鎖 +10 次">→</button>
+        </div>
+        <div id="turnstileSlot"></div>
+        <p class="hint">用完免費次數時輸入解鎖碼，可再加 10 次（每週一重置）。</p>
+      </section>
     </div>
   </dialog>
 
@@ -2459,8 +2472,9 @@
         MAX_TOKENS: 3200,       // v2：2400 → 3200，減少七段被截斷
         TEMPERATURE: 0.85,      // 只在 thinking 關閉時有效
         THINKING: "disabled",   // v2.1：思考模式預設開啟會令 temperature 失效、變慢、變貴
+        TURNSTILE_SITE_KEY: "", // 選填：Cloudflare Turnstile 的 Site Key（Worker 設了 TURNSTILE_SECRET 才需要填）
         STREAM: true,           // v2：串流輸出（逐字顯示）
-        APP_VERSION: "2.1.0",
+        APP_VERSION: "2.2.0",
         HISTORY_LIMIT: 20
       });
 
@@ -3166,16 +3180,21 @@
           if (!response.ok) {
             const entry = STATUS_MESSAGES[response.status];
             let apiMessage = "";
+            let apiCode = "";
             try {
               const data = await response.json();
               apiMessage = data && data.error && data.error.message ? String(data.error.message) : "";
+              apiCode = data && data.error && data.error.code ? String(data.error.code) : "";
             } catch (error) {
               apiMessage = "";
             }
-            const message = entry
-              ? entry[0]
-              : "API 請求失敗（HTTP " + response.status + "）" + (apiMessage ? "：" + apiMessage : "");
-            const failure = new AppError(message, entry ? entry[1] : "http");
+            const isQuota = apiCode === "quota_exhausted";
+            const message = isQuota
+              ? (apiMessage || "本週免費次數已用完。")
+              : (entry
+                ? entry[0]
+                : "API 請求失敗（HTTP " + response.status + "）" + (apiMessage ? "：" + apiMessage : ""));
+            const failure = new AppError(message, isQuota ? "quota" : (entry ? entry[1] : "http"));
             failure.httpStatus = response.status;
             throw failure;
           }
@@ -3358,6 +3377,10 @@
         } catch (error) {
           const normalized = normalizeError(error);
           showError(normalized.message, normalized.code);
+          if (normalized.code === "quota") {
+            refreshQuota();
+            openSettings();
+          }
           setResultState("error");
           showToast("解讀失敗，請稍後再試", "error");
         } finally {
@@ -3931,6 +3954,20 @@
         if (elsV2.closeHistoryBtn) elsV2.closeHistoryBtn.addEventListener("click", closeHistory);
         if (elsV2.downloadBtn) elsV2.downloadBtn.addEventListener("click", downloadReading);
 
+        const unlockBtn = document.getElementById("unlockBtn");
+        if (unlockBtn) unlockBtn.addEventListener("click", unlockQuota);
+        const unlockInput = document.getElementById("unlockInput");
+        if (unlockInput) {
+          unlockInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") { event.preventDefault(); unlockQuota(); }
+          });
+        }
+        loadTurnstile();
+        refreshQuota();
+
+        const settingsBtn = document.getElementById("settingsBtn");
+        if (settingsBtn) settingsBtn.addEventListener("click", refreshQuota);
+
         if (elsV2.historyDialog) {
           elsV2.historyDialog.addEventListener("click", (event) => {
             if (event.target === elsV2.historyDialog) closeHistory();
@@ -3944,6 +3981,85 @@
 
         const modelLabel = document.getElementById("modelNameLabel");
         if (modelLabel) modelLabel.textContent = API_MODEL + (CONFIG.THINKING === "disabled" ? " · 非思考" : " · 思考");
+      }
+
+      /* ---------- v2.2：每週配額 / 解鎖碼 / Turnstile ---------- */
+
+      let turnstileWidgetId = null;
+
+      function proxyBase() {
+        return String(CONFIG.PROXY_URL || "").replace(/\/+$/, "");
+      }
+
+      async function refreshQuota() {
+        const block = document.getElementById("quotaBlock");
+        const status = document.getElementById("quotaStatus");
+        if (!block || !status) return;
+        if (keyMode() !== "proxy") { block.hidden = true; return; }
+        block.hidden = false;
+        status.textContent = "讀取中…";
+        try {
+          const res = await fetch(proxyBase() + "/quota");
+          const data = await res.json().catch(() => null);
+          if (!res.ok || !data) { status.textContent = "讀取失敗"; return; }
+          status.textContent = "本週免費 " + data.weeklyMax + " 次，已用 " + data.used +
+            " 次，剩 " + data.remaining + " 次（目前上限 " + data.limit + "）";
+        } catch (error) {
+          status.textContent = "讀取失敗（網絡問題）";
+        }
+      }
+
+      function loadTurnstile() {
+        if (!CONFIG.TURNSTILE_SITE_KEY || window.turnstile) return;
+        const script = document.createElement("script");
+        script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+        script.async = true;
+        script.defer = true;
+        script.onload = renderTurnstile;
+        document.head.appendChild(script);
+      }
+
+      function renderTurnstile() {
+        const slot = document.getElementById("turnstileSlot");
+        if (!slot || !window.turnstile || turnstileWidgetId !== null) return;
+        turnstileWidgetId = window.turnstile.render(slot, {
+          sitekey: CONFIG.TURNSTILE_SITE_KEY,
+          theme: "auto"
+        });
+      }
+
+      function turnstileToken() {
+        if (!CONFIG.TURNSTILE_SITE_KEY || !window.turnstile || turnstileWidgetId === null) return "";
+        return window.turnstile.getResponse(turnstileWidgetId) || "";
+      }
+
+      async function unlockQuota() {
+        if (keyMode() !== "proxy") {
+          showToast("此版本不用解鎖（自備金鑰）", "error");
+          return;
+        }
+        const input = document.getElementById("unlockInput");
+        const password = input ? String(input.value || "").trim() : "";
+        if (!password) { showToast("請輸入解鎖碼", "error"); return; }
+
+        try {
+          const res = await fetch(proxyBase() + "/unlock", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password: password, turnstileToken: turnstileToken() })
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            showToast((data && data.error && data.error.message) || "解鎖失敗", "error");
+            if (window.turnstile && turnstileWidgetId !== null) window.turnstile.reset(turnstileWidgetId);
+            return;
+          }
+          if (input) input.value = "";
+          showToast("解鎖成功，本週可用 " + data.limit + " 次");
+          refreshQuota();
+        } catch (error) {
+          showToast("解鎖失敗（網絡問題）", "error");
+        }
       }
 
       /* 對外暴露少量內部函式，供離線自動測試使用（不影響一般操作） */
