@@ -2169,6 +2169,19 @@
     .quota-chip[hidden] { display: none; }
     .quota-chip[data-state="low"] { border-color: #f59e0b; color: #f59e0b; }
     .quota-chip[data-state="blocked"] { border-color: #ef4444; color: #ef4444; }
+    .gate {
+      position: fixed; inset: 0; z-index: 9998; display: flex; align-items: center; justify-content: center;
+      padding: 1.2rem; background: rgba(2, 6, 23, .78); backdrop-filter: blur(3px);
+    }
+    .gate[hidden] { display: none; }
+    .gate-card {
+      max-width: 420px; width: 100%; background: #fff; color: #0f172a; border-radius: 1rem;
+      padding: 1.4rem 1.3rem; text-align: center; box-shadow: 0 24px 60px rgba(0, 0, 0, .35);
+    }
+    [data-theme="dark"] .gate-card { background: #111827; color: #e5e7eb; }
+    .gate-card h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
+    .gate-card .hint { font-size: .82rem; opacity: .8; margin: .35rem 0; }
+    #gateSlot { margin: 1rem 0 .6rem; display: flex; justify-content: center; }
   </style>
 </head>
 <body>
@@ -2483,7 +2496,7 @@
         THINKING: "disabled",   // v2.1：思考模式預設開啟會令 temperature 失效、變慢、變貴
         TURNSTILE_SITE_KEY: "0x4AAAAAAGA8l3vddzBzeEAu", // Cloudflare Turnstile Site Key（公開資料）
         STREAM: true,           // v2：串流輸出（逐字顯示）
-        APP_VERSION: "2.4.0",
+        APP_VERSION: "2.5.0",
         HISTORY_LIMIT: 20
       });
 
@@ -3111,7 +3124,11 @@
         const useProxy = mode === "proxy";
         const base = useProxy ? String(CONFIG.PROXY_URL).replace(/\/+$/, "") : null;
         const headers = { "Content-Type": "application/json" };
-        if (!useProxy) headers.Authorization = "Bearer " + apiKey;
+        if (!useProxy) {
+          headers.Authorization = "Bearer " + apiKey;
+        } else if (sessionToken) {
+          headers["x-zwds-session"] = sessionToken;
+        }
         return {
           url: useProxy ? base + "/chat" : API_ENDPOINT,
           headers: headers,
@@ -3198,12 +3215,16 @@
               apiMessage = "";
             }
             const isQuota = apiCode === "quota_exhausted" || apiCode === "global_blocked";
+            const isSession = apiCode === "session_required";
             const message = isQuota
               ? (apiMessage || "本週免費次數已用完。")
               : (entry
                 ? entry[0]
                 : "API 請求失敗（HTTP " + response.status + "）" + (apiMessage ? "：" + apiMessage : ""));
-            const failure = new AppError(message, isQuota ? "quota" : (entry ? entry[1] : "http"));
+            const failure = new AppError(
+              message,
+              isSession ? "session" : (isQuota ? "quota" : (entry ? entry[1] : "http"))
+            );
             failure.httpStatus = response.status;
             throw failure;
           }
@@ -3389,6 +3410,11 @@
           if (normalized.code === "quota") {
             refreshQuota();
             openSettings();
+          }
+          if (normalized.code === "session") {
+            sessionToken = "";
+            try { window.sessionStorage.removeItem("zwds.session"); } catch (error) { /* 忽略 */ }
+            showGate();
           }
           setResultState("error");
           showToast("解讀失敗，請稍後再試", "error");
@@ -3980,6 +4006,7 @@
           });
         }
         loadTurnstile();
+        maybeShowGate();
         refreshQuota();
 
         const settingsBtn = document.getElementById("settingsBtn");
@@ -3998,6 +4025,81 @@
 
         const modelLabel = document.getElementById("modelNameLabel");
         if (modelLabel) modelLabel.textContent = API_MODEL + (CONFIG.THINKING === "disabled" ? " · 非思考" : " · 思考");
+      }
+
+      /* ---------- v2.5：整站人機驗證（gate） ---------- */
+
+      const SESSION_KEY = "zwds.session";
+      let sessionToken = "";
+      try { sessionToken = window.sessionStorage.getItem(SESSION_KEY) || ""; } catch (error) { sessionToken = ""; }
+      let gateWidgetId = null;
+
+      function gateNeeded() {
+        return keyMode() === "proxy" && Boolean(CONFIG.TURNSTILE_SITE_KEY) && !sessionToken;
+      }
+
+      function renderGateTurnstile() {
+        const slot = document.getElementById("gateSlot");
+        if (!slot) return;
+        if (!window.turnstile) { loadTurnstile(); return; }
+        if (gateWidgetId !== null) { window.turnstile.reset(gateWidgetId); return; }
+        gateWidgetId = window.turnstile.render(slot, {
+          sitekey: CONFIG.TURNSTILE_SITE_KEY,
+          action: "gate",
+          theme: "auto",
+          language: "zh-tw",
+          callback: onGateSuccess
+        });
+      }
+
+      async function onGateSuccess(token) {
+        const status = document.getElementById("gateStatus");
+        if (status) status.textContent = "驗證成功，正在開通…";
+        try {
+          const res = await fetch(proxyBase() + "/verify", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ "cf-turnstile-response": token })
+          });
+          const data = await res.json().catch(() => null);
+          if (!res.ok) {
+            if (status) status.textContent = (data && data.error && data.error.message) || "驗證失敗，請再試";
+            if (window.turnstile && gateWidgetId !== null) window.turnstile.reset(gateWidgetId);
+            return;
+          }
+          if (data && data.token) {
+            sessionToken = data.token;
+            try { window.sessionStorage.setItem(SESSION_KEY, sessionToken); } catch (error) { /* 忽略 */ }
+          } else {
+            sessionToken = "skipped";
+          }
+          hideGate();
+          showToast("驗證完成，可以開始解讀");
+        } catch (error) {
+          if (status) status.textContent = "網絡問題，請再試一次";
+        }
+      }
+
+      function showGate() {
+        const gate = document.getElementById("gateOverlay");
+        if (!gate) return;
+        gate.hidden = false;
+        document.body.style.overflow = "hidden";
+        const status = document.getElementById("gateStatus");
+        if (status) status.textContent = "請完成下方驗證…";
+        renderGateTurnstile();
+      }
+
+      function hideGate() {
+        const gate = document.getElementById("gateOverlay");
+        if (!gate) return;
+        gate.hidden = true;
+        document.body.style.overflow = "";
+      }
+
+      function maybeShowGate() {
+        if (gateNeeded()) showGate();
+        else hideGate();
       }
 
       /* ---------- v2.2：每週配額 / 解鎖碼 / Turnstile ---------- */
@@ -4048,7 +4150,10 @@
         script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
         script.async = true;
         script.defer = true;
-        script.onload = renderTurnstile;
+        script.onload = function () {
+          renderTurnstile();
+          if (gateNeeded()) renderGateTurnstile();
+        };
         document.head.appendChild(script);
       }
 
@@ -4140,5 +4245,15 @@
       <p class="kbd-note">紀錄存在 localStorage 的 <code>zwds.history</code>。按「刪除」只會移除該筆。</p>
     </div>
   </dialog>
+
+  <!-- v2.5：整站人機驗證（未通過不可用） -->
+  <div class="gate" id="gateOverlay" hidden role="dialog" aria-modal="true" aria-labelledby="gateTitle">
+    <div class="gate-card">
+      <h3 id="gateTitle">先完成人機驗證</h3>
+      <p class="hint">為防止濫用，使用前需要通過 Cloudflare 驗證。通過後 30 分鐘內免再驗。</p>
+      <div id="gateSlot"></div>
+      <p class="hint" id="gateStatus">驗證中…</p>
+    </div>
+  </div>
 </body>
 </html>
