@@ -2182,6 +2182,8 @@
     .gate-card h3 { margin: 0 0 .5rem; font-size: 1.05rem; }
     .gate-card .hint { font-size: .82rem; opacity: .8; margin: .35rem 0; }
     #gateSlot { margin: 1rem 0 .6rem; display: flex; justify-content: center; }
+    #gateRetryBtn { margin-top: .4rem; }
+    #gateRetryBtn[hidden] { display: none; }
   </style>
 </head>
 <body>
@@ -2496,7 +2498,7 @@
         THINKING: "disabled",   // v2.1：思考模式預設開啟會令 temperature 失效、變慢、變貴
         TURNSTILE_SITE_KEY: "0x4AAAAAAGA8l3vddzBzeEAu", // Cloudflare Turnstile Site Key（公開資料）
         STREAM: true,           // v2：串流輸出（逐字顯示）
-        APP_VERSION: "2.5.0",
+        APP_VERSION: "2.5.1",
         HISTORY_LIMIT: 20
       });
 
@@ -3989,6 +3991,17 @@
         if (elsV2.closeHistoryBtn) elsV2.closeHistoryBtn.addEventListener("click", closeHistory);
         if (elsV2.downloadBtn) elsV2.downloadBtn.addEventListener("click", downloadReading);
 
+        const gateRetry = document.getElementById("gateRetryBtn");
+        if (gateRetry) {
+          gateRetry.addEventListener("click", () => {
+            gateRetry.hidden = true;
+            const status = document.getElementById("gateStatus");
+            if (status) status.textContent = "請完成下方驗證…";
+            if (window.turnstile && gateWidgetId !== null) window.turnstile.reset(gateWidgetId);
+            else renderGateTurnstile();
+          });
+        }
+
         const quotaChip = document.getElementById("quotaChip");
         if (quotaChip) {
           quotaChip.addEventListener("click", () => {
@@ -4073,6 +4086,8 @@
 
           if (!res.ok) {
             if (status) status.textContent = (data && data.error && data.error.message) || "驗證失敗，請再試";
+            const retry = document.getElementById("gateRetryBtn");
+            if (retry) retry.hidden = false;
             if (window.turnstile && gateWidgetId !== null) window.turnstile.reset(gateWidgetId);
             return;
           }
@@ -4262,6 +4277,7 @@
       <p class="hint">為防止濫用，使用前需要通過 Cloudflare 驗證。通過後 30 分鐘內免再驗。</p>
       <div id="gateSlot"></div>
       <p class="hint" id="gateStatus">驗證中…</p>
+      <button class="btn btn-primary" id="gateRetryBtn" type="button" hidden>重新驗證</button>
     </div>
   </div>
 </body>
