@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#0f172a" id="themeColorMeta" />
   <!-- v2 安全加固：CSP 限制連線目的地。
        若用 Cloudflare Worker 代理，https://*.workers.dev 已允許；自訂網域請自行加入 connect-src。 -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.deepseek.com https://*.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.deepseek.com https://*.workers.dev https://ziwe-kevin.www-wongkevin404.workers.dev; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; object-src 'none'" />
   <meta name="description" content="結合紫微斗數牌卡與 AI 的智慧解讀。選擇主星、輔星與十二長生，探索此刻的星曜能量。" />
   <title>🔮 紫微斗數 AI 解牌</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%94%AE%3C/text%3E%3C/svg%3E" />
@@ -2372,6 +2372,7 @@
   <footer class="site-footer">
     <p><strong>紫微斗數 AI 解牌</strong> · 以牌卡為媒介的自我探索工具</p>
     <p class="fineprint">星曜是提醒，不是命令。願你在每一次選擇裡，都更靠近真實的自己。</p>
+    <p class="fineprint">另一個版本：<a href="./byok.html">自備金鑰版（BYOK）</a></p>
     <p class="fineprint" id="versionLine">改進版 v2.0.0 · 原始設計 cy55088c-hue/ziwei（2026-11-11 快照）</p>
   </footer>
 
@@ -2452,7 +2453,7 @@
             唯一真正安全的公開做法＝代理（PROXY_URL），金鑰留在伺服器。
             內嵌金鑰只可以放「只在自己電腦開（file:// 或 localhost）」的私人副本。 */
       const CONFIG = Object.freeze({
-        PROXY_URL: "",          // 例："https://ziwei-proxy.你的名字.workers.dev"（公開分享用，最安全）
+        PROXY_URL: "https://ziwe-kevin.www-wongkevin404.workers.dev",
         INLINE_API_KEY: "",     // 只放私人副本（file:// 本機）；填入後公開就等於公開金鑰
         MODEL: "deepseek-flash",   // v2.1：deepseek-chat 係舊名（官方公告 2026-07-24 停用）
         MAX_TOKENS: 3200,       // v2：2400 → 3200，減少七段被截斷
