@@ -1,109 +1,209 @@
 /**
- * 紫微斗數 AI 解牌 v2 — DeepSeek 代理（Cloudflare Worker）
+ * 紫微斗數 AI 解牌 v3 — DeepSeek 代理（Cloudflare Worker）
  *
- * 為什麼要這個檔：靜態網頁內嵌的 API 金鑰，等於公開金鑰（F12 就睇到）。
- * 把金鑰放在 Worker 的環境變數，瀏覽器只會見到 Worker 網址，永遠拿不到金鑰。
+ * 功能：
+ *  - 金鑰只存在 Worker secret，前端永遠拿不到
+ *  - 每 IP 每週免費 10 次（WEEKLY_MAX），用完可以輸入解鎖碼 +10 次（UNLOCK_BONUS）
+ *  - 解鎖可加 Cloudflare Turnstile 人機驗證（設定 TURNSTILE_SECRET 後自動啟用）
+ *  - 有 KV binding（ZWDS_KV）時配額持久；冇就用記憶體（isolate 重啟會歸零）
  *
- * 部署步驟見：00-索引\05-部署指引.md
+ * 需要的環境變數／Secret：
+ *  DEEPSEEK_API_KEY   必填，DeepSeek 金鑰
+ *  UNLOCK_PASSWORD    選填，解鎖碼（例如 tccs）；唔設 = 停用解鎖功能
+ *  TURNSTILE_SECRET   選填，Cloudflare Turnstile 的 secret key
+ *  ZWDS_KV            選填，KV namespace binding（建議加，配額才持久）
  */
 
-// ⚠️ 改成你自己的網域（不要含路徑）。用 "*" 表示任何來源都可以（不建議）。
 const ALLOWED_ORIGINS = [
-  "https://YOUR-NAME.github.io",
+  "https://wongggggggggggggggggg.github.io",
   "http://localhost:8080",
   "http://127.0.0.1:8080"
 ];
 
-// v2.1：deepseek-chat / deepseek-reasoner 係舊名（官方公告 2026-07-24 起停用）
 const ALLOWED_MODELS = ["deepseek-flash", "deepseek-v4-pro"];
 const MAX_TOKENS_CAP = 4096;
+const WEEKLY_MAX = 10;      // 每人每週免費次數
+const UNLOCK_BONUS = 10;    // 每次解鎖額外加送
 const RATE_WINDOW_MS = 60000;
-const RATE_MAX = 8; // 每個 IP 每分鐘最多 8 次（防被人刷爆你的額度）
+const RATE_MAX = 6;         // 每 IP 每分鐘最多 6 次（防瞬時爆發）
 
-// 每日總請求上限（best-effort：Worker isolate 重啟會歸零，真正硬上限係帳戶餘額）
-// deepseek-flash 一次解讀約 ¥0.006–0.012 → 40 次 ≈ ¥0.24–0.48，留足緩衝
-const DAILY_MAX = 40;
-const daily = { date: "", count: 0 };
+const memQuota = new Map();
+const memRate = new Map();
 
-function dailyGuard() {
-  const today = new Date().toISOString().slice(0, 10);
-  if (daily.date !== today) {
-    daily.date = today;
-    daily.count = 0;
-  }
-  daily.count += 1;
-  return daily.count <= DAILY_MAX;
-}
-
-const buckets = new Map();
-
+/* ---------------- CORS / 回應 ---------------- */
 function corsHeaders(origin) {
   const allowAll = ALLOWED_ORIGINS.includes("*");
   const allowed = allowAll || ALLOWED_ORIGINS.includes(origin);
   return {
     "Access-Control-Allow-Origin": allowed ? (allowAll ? "*" : origin) : "null",
-    "Access-Control-Allow-Headers": "content-type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "content-type, x-request-id",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Max-Age": "86400",
     Vary: "Origin"
   };
 }
 
-function fail(message, status, origin) {
-  return new Response(JSON.stringify({ error: { message: message } }), {
-    status: status,
+function json(body, status, origin) {
+  return new Response(JSON.stringify(body), {
+    status,
     headers: Object.assign({ "content-type": "application/json; charset=utf-8" }, corsHeaders(origin))
   });
+}
+
+function fail(message, status, origin, code) {
+  return json({ error: { message, code: code || "error" } }, status, origin);
+}
+
+/* ---------------- 每週配額 ---------------- */
+function weekKey(now) {
+  const d = new Date(typeof now === "number" ? now : Date.now());
+  const day = (d.getUTCDay() + 6) % 7;          // 星期一 = 0
+  d.setUTCDate(d.getUTCDate() - day);
+  return d.toISOString().slice(0, 10);           // 用「本週星期一」做 key
+}
+
+async function readQuota(env, ip) {
+  const key = "q:" + weekKey() + ":" + ip;
+  if (env.ZWDS_KV) {
+    const raw = await env.ZWDS_KV.get(key, "json");
+    return raw || { used: 0, bonus: 0 };
+  }
+  return memQuota.get(key) || { used: 0, bonus: 0 };
+}
+
+async function writeQuota(env, ip, value) {
+  const key = "q:" + weekKey() + ":" + ip;
+  if (env.ZWDS_KV) {
+    await env.ZWDS_KV.put(key, JSON.stringify(value), { expirationTtl: 14 * 86400 });
+    return;
+  }
+  memQuota.set(key, value);
+}
+
+/* ---------------- 限流（固定窗口） ---------------- */
+function rateOk(bucketKey, max, windowMs) {
+  const now = Date.now();
+  const b = memRate.get(bucketKey) || { start: now, count: 0 };
+  if (now - b.start > windowMs) { b.start = now; b.count = 0; }
+  b.count += 1;
+  memRate.set(bucketKey, b);
+  return b.count <= max;
+}
+
+/* ---------------- Turnstile ---------------- */
+async function verifyTurnstile(env, token, ip) {
+  if (!env.TURNSTILE_SECRET) return { ok: true, skipped: true };
+  if (!token) return { ok: false, error: "缺少人機驗證 token" };
+  const form = new FormData();
+  form.append("secret", env.TURNSTILE_SECRET);
+  form.append("response", String(token));
+  if (ip) form.append("remoteip", ip);
+  try {
+    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
+    const data = await res.json();
+    return { ok: Boolean(data.success), error: (data["error-codes"] || []).join(",") };
+  } catch (error) {
+    return { ok: false, error: "驗證服務連不上" };
+  }
+}
+
+/* ---------------- 常數時間比對 ---------------- */
+function safeEqual(a, b) {
+  const x = String(a);
+  const y = String(b);
+  let diff = x.length ^ y.length;
+  const len = Math.max(x.length, y.length);
+  for (let i = 0; i < len; i += 1) {
+    diff |= (x.charCodeAt(i) || 0) ^ (y.charCodeAt(i) || 0);
+  }
+  return diff === 0;
 }
 
 export default {
   async fetch(request, env) {
     const origin = request.headers.get("origin") || "";
+    const url = new URL(request.url);
+    const ip = request.headers.get("cf-connecting-ip") || "unknown";
 
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
-    if (request.method !== "POST") {
-      return fail("只接受 POST", 405, origin);
-    }
     if (!ALLOWED_ORIGINS.includes("*") && !ALLOWED_ORIGINS.includes(origin)) {
-      return fail("origin not allowed: " + origin, 403, origin);
-    }
-    if (!env.DEEPSEEK_API_KEY) {
-      return fail("worker 未設定 DEEPSEEK_API_KEY", 500, origin);
+      return fail("origin not allowed: " + origin, 403, origin, "origin");
     }
 
-    // 簡易限流（每個 isolate 獨立計數，重啟即清空；足夠擋 casual abuse）
-    const ip = request.headers.get("cf-connecting-ip") || "unknown";
-    const now = Date.now();
-    const bucket = buckets.get(ip) || { start: now, count: 0 };
-    if (now - bucket.start > RATE_WINDOW_MS) {
-      bucket.start = now;
-      bucket.count = 0;
-    }
-    bucket.count += 1;
-    buckets.set(ip, bucket);
-    if (bucket.count > RATE_MAX) {
-      return fail("請求過於頻繁，請等一分鐘再試。", 429, origin);
-    }
-    if (!dailyGuard()) {
-      return fail("今日解讀額度已用完，請明天再試。", 429, origin);
-    }
-
-    let payload;
-    try {
-      payload = await request.json();
-    } catch (error) {
-      return fail("body 不是合法 JSON", 400, origin);
+    /* ---- 查詢配額 ---- */
+    if (request.method === "GET" && url.pathname === "/quota") {
+      const q = await readQuota(env, ip);
+      const limit = WEEKLY_MAX + (q.bonus || 0);
+      return json({
+        ok: true,
+        week: weekKey(),
+        used: q.used,
+        bonus: q.bonus || 0,
+        limit,
+        remaining: Math.max(0, limit - q.used),
+        weeklyMax: WEEKLY_MAX,
+        unlockBonus: UNLOCK_BONUS,
+        unlockEnabled: Boolean(env.UNLOCK_PASSWORD),
+        turnstileEnabled: Boolean(env.TURNSTILE_SECRET)
+      }, 200, origin);
     }
 
+    if (request.method !== "POST") return fail("只接受 POST", 405, origin, "method");
+
+    /* ---- 解鎖碼 ---- */
+    if (url.pathname === "/unlock") {
+      if (!env.UNLOCK_PASSWORD) return fail("伺服器未啟用解鎖功能", 503, origin, "unlock_disabled");
+      if (!rateOk("unlock:" + ip, 5, 600000)) {
+        return fail("嘗試次數過多，請 10 分鐘後再試。", 429, origin, "unlock_rate");
+      }
+      let body = null;
+      try { body = await request.json(); } catch (error) { body = null; }
+
+      const ts = await verifyTurnstile(env, body && body.turnstileToken, ip);
+      if (!ts.ok) return fail("人機驗證失敗" + (ts.error ? "（" + ts.error + "）" : ""), 400, origin, "turnstile");
+
+      if (!safeEqual((body && body.password) || "", env.UNLOCK_PASSWORD)) {
+        return fail("解鎖碼不正確", 403, origin, "bad_password");
+      }
+
+      const q = await readQuota(env, ip);
+      q.bonus = (q.bonus || 0) + UNLOCK_BONUS;
+      await writeQuota(env, ip, q);
+      const limit = WEEKLY_MAX + q.bonus;
+      return json({ ok: true, bonus: q.bonus, used: q.used, limit, remaining: Math.max(0, limit - q.used) }, 200, origin);
+    }
+
+    /* ---- 對話 ---- */
+    if (url.pathname !== "/chat") return fail("not found", 404, origin, "path");
+    if (!env.DEEPSEEK_API_KEY) return fail("Worker 未設定 DEEPSEEK_API_KEY", 500, origin, "no_key");
+
+    if (!rateOk("chat:" + ip, RATE_MAX, RATE_WINDOW_MS)) {
+      return fail("請求太頻繁，請一分鐘後再試。", 429, origin, "rate");
+    }
+
+    const quota = await readQuota(env, ip);
+    const limit = WEEKLY_MAX + (quota.bonus || 0);
+    if (quota.used >= limit) {
+      return fail(
+        "本週免費次數已用完（" + limit + " 次）。輸入解鎖碼可再加 " + UNLOCK_BONUS + " 次。",
+        429, origin, "quota_exhausted"
+      );
+    }
+
+    let payload = null;
+    try { payload = await request.json(); } catch (error) { payload = null; }
     if (!payload || ALLOWED_MODELS.indexOf(payload.model) === -1) {
-      return fail("model not allowed", 400, origin);
+      return fail("model not allowed", 400, origin, "model");
     }
     if (typeof payload.max_tokens === "number" && payload.max_tokens > MAX_TOKENS_CAP) {
       payload.max_tokens = MAX_TOKENS_CAP;
     }
-    delete payload.n; // 不開放一次多個回覆
+    delete payload.n;
+
+    quota.used += 1;
+    await writeQuota(env, ip, quota);
 
     let upstream;
     try {
@@ -116,17 +216,15 @@ export default {
         body: JSON.stringify(payload)
       });
     } catch (error) {
-      return fail("連不到 DeepSeek：" + error.message, 502, origin);
+      return fail("連不到 DeepSeek：" + error.message, 502, origin, "upstream");
     }
 
-    const headers = Object.assign(
-      corsHeaders(origin),
-      {
-        "content-type": upstream.headers.get("content-type") || "application/json"
-      }
-    );
+    const headers = Object.assign(corsHeaders(origin), {
+      "content-type": upstream.headers.get("content-type") || "application/json",
+      "x-quota-remaining": String(Math.max(0, limit - quota.used))
+    });
     if (payload.stream) headers["cache-control"] = "no-store";
 
-    return new Response(upstream.body, { status: upstream.status, headers: headers });
+    return new Response(upstream.body, { status: upstream.status, headers });
   }
 };
