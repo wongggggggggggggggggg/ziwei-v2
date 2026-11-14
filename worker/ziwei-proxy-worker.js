@@ -26,6 +26,7 @@ const WEEKLY_MAX = 10;      // 每人每週免費次數
 const UNLOCK_BONUS = 10;    // 每次解鎖：個人 +10
 const GLOBAL_WEEKLY_MAX = 40;    // 全站每週總次數（所有 IP 合計），超過即全站封鎖
 const GLOBAL_UNLOCK_BONUS = 40;  // 每次解鎖：全站額度 +40（即解鎖一次放行多一輪）
+const SESSION_TTL_SECONDS = 1800; // 通過 Turnstile 後，30 分鐘內免再驗
 const RATE_WINDOW_MS = 60000;
 const RATE_MAX = 6;         // 每 IP 每分鐘最多 6 次（防瞬時爆發）
 
@@ -151,6 +152,35 @@ async function verifyTurnstile(env, token, ip) {
   }
 }
 
+/* ---------------- 通過驗證後的 session token（HMAC 簽名） ---------------- */
+async function hmacHex(env, text) {
+  const secret = env.SESSION_SECRET || env.UNLOCK_PASSWORD || "zwds-session-default";
+  const key = await crypto.subtle.importKey(
+    "raw", new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" }, false, ["sign"]
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(sig)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function issueSession(env) {
+  const exp = Date.now() + SESSION_TTL_SECONDS * 1000;
+  const hex = await hmacHex(env, "s:" + exp);
+  return { token: exp + "." + hex, exp: exp, ttl: SESSION_TTL_SECONDS };
+}
+
+async function checkSession(env, headerValue) {
+  if (!env.TURNSTILE_SECRET) return { ok: true, skipped: true };
+  const raw = String(headerValue || "");
+  const dot = raw.indexOf(".");
+  if (dot < 1) return { ok: false, reason: "missing" };
+  const exp = Number(raw.slice(0, dot));
+  const hex = raw.slice(dot + 1);
+  if (!exp || exp < Date.now()) return { ok: false, reason: "expired" };
+  const expected = await hmacHex(env, "s:" + exp);
+  return { ok: safeEqual(hex, expected), reason: "invalid" };
+}
+
 /* ---------------- 常數時間比對 ---------------- */
 function safeEqual(a, b) {
   const x = String(a);
@@ -239,8 +269,32 @@ export default {
       }, 200, origin);
     }
 
+    /* ---- 用 Turnstile 換 session token（整站使用前必須通過） ---- */
+    if (url.pathname === "/verify") {
+      let body = null;
+      try { body = await request.json(); } catch (error) { body = null; }
+      const token = body && (body["cf-turnstile-response"] || body.turnstileToken);
+      const ts = await verifyTurnstile(env, token, ip);
+      if (!ts.ok) {
+        return fail("人機驗證失敗" + (ts.error ? "（" + ts.error + "）" : ""), 400, origin, "turnstile");
+      }
+      if (ts.skipped) {
+        return json({ ok: true, skipped: true, ttl: SESSION_TTL_SECONDS }, 200, origin);
+      }
+      const session = await issueSession(env);
+      return json({ ok: true, token: session.token, exp: session.exp, ttl: session.ttl }, 200, origin);
+    }
+
     /* ---- 對話 ---- */
     if (url.pathname !== "/chat") return fail("not found", 404, origin, "path");
+
+    const session = await checkSession(env, request.headers.get("x-zwds-session"));
+    if (!session.ok) {
+      return fail(
+        "請先完成人機驗證（" + (session.reason === "expired" ? "驗證已過期" : "未通過驗證") + "）。",
+        401, origin, "session_required"
+      );
+    }
     if (!env.DEEPSEEK_API_KEY) return fail("Worker 未設定 DEEPSEEK_API_KEY", 500, origin, "no_key");
 
     if (!rateOk("chat:" + ip, RATE_MAX, RATE_WINDOW_MS)) {
