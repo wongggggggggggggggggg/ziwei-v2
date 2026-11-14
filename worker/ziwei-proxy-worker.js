@@ -101,7 +101,18 @@ async function verifyTurnstile(env, token, ip) {
   try {
     const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", { method: "POST", body: form });
     const data = await res.json();
-    return { ok: Boolean(data.success), error: (data["error-codes"] || []).join(",") };
+    if (!data.success) {
+      return { ok: false, error: (data["error-codes"] || []).join(",") || "siteverify 回 success=false" };
+    }
+    // canonical 檢查：action 與 hostname 都要符合，否則等於 token 被挪用
+    if (data.action && data.action !== "unlock") {
+      return { ok: false, error: "action 不符：" + data.action };
+    }
+    const hosts = ["wongggggggggggggggggg.github.io", "localhost", "127.0.0.1"];
+    if (data.hostname && hosts.indexOf(data.hostname) === -1) {
+      return { ok: false, error: "hostname 不符：" + data.hostname };
+    }
+    return { ok: true };
   } catch (error) {
     return { ok: false, error: "驗證服務連不上" };
   }
@@ -161,7 +172,8 @@ export default {
       let body = null;
       try { body = await request.json(); } catch (error) { body = null; }
 
-      const ts = await verifyTurnstile(env, body && body.turnstileToken, ip);
+      const turnstileToken = body && (body["cf-turnstile-response"] || body.turnstileToken);
+      const ts = await verifyTurnstile(env, turnstileToken, ip);
       if (!ts.ok) return fail("人機驗證失敗" + (ts.error ? "（" + ts.error + "）" : ""), 400, origin, "turnstile");
 
       if (!safeEqual((body && body.password) || "", env.UNLOCK_PASSWORD)) {
