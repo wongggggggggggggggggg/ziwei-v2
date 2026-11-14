@@ -125,7 +125,7 @@ function rateOk(bucketKey, max, windowMs) {
 }
 
 /* ---------------- Turnstile ---------------- */
-async function verifyTurnstile(env, token, ip) {
+async function verifyTurnstile(env, token, ip, expectedAction) {
   if (!env.TURNSTILE_SECRET) return { ok: true, skipped: true };
   if (!token) return { ok: false, error: "缺少人機驗證 token" };
   const form = new FormData();
@@ -139,8 +139,8 @@ async function verifyTurnstile(env, token, ip) {
       return { ok: false, error: (data["error-codes"] || []).join(",") || "siteverify 回 success=false" };
     }
     // canonical 檢查：action 與 hostname 都要符合，否則等於 token 被挪用
-    if (data.action && data.action !== "unlock") {
-      return { ok: false, error: "action 不符：" + data.action };
+    if (data.action && expectedAction && data.action !== expectedAction) {
+      return { ok: false, error: "action 不符：" + data.action + "（此端點要求 " + expectedAction + "）" };
     }
     const hosts = ["wongggggggggggggggggg.github.io", "localhost", "127.0.0.1"];
     if (data.hostname && hosts.indexOf(data.hostname) === -1) {
@@ -245,7 +245,7 @@ export default {
       try { body = await request.json(); } catch (error) { body = null; }
 
       const turnstileToken = body && (body["cf-turnstile-response"] || body.turnstileToken);
-      const ts = await verifyTurnstile(env, turnstileToken, ip);
+      const ts = await verifyTurnstile(env, turnstileToken, ip, "unlock");
       if (!ts.ok) return fail("人機驗證失敗" + (ts.error ? "（" + ts.error + "）" : ""), 400, origin, "turnstile");
 
       if (!safeEqual((body && body.password) || "", env.UNLOCK_PASSWORD)) {
@@ -274,7 +274,7 @@ export default {
       let body = null;
       try { body = await request.json(); } catch (error) { body = null; }
       const token = body && (body["cf-turnstile-response"] || body.turnstileToken);
-      const ts = await verifyTurnstile(env, token, ip);
+      const ts = await verifyTurnstile(env, token, ip, "gate");
       if (!ts.ok) {
         return fail("人機驗證失敗" + (ts.error ? "（" + ts.error + "）" : ""), 400, origin, "turnstile");
       }
